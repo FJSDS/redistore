@@ -166,7 +166,7 @@ func NewRedisStore(size int, network, address, password string,db int, keyPairs 
 	if err!=nil{
 		return nil,err
 	}
-	return NewRediStoreWithPool(pool, keyPairs...),nil
+	return NewRedisStoreWithPool(pool, keyPairs...),nil
 }
 
 func dialWithDB(network, address, password string,DB int) (redis.Cmdable, error) {
@@ -178,7 +178,7 @@ func dialWithDB(network, address, password string,DB int) (redis.Cmdable, error)
 }
 
 // NewRediStoreWithPool instantiates a RediStore with a *redis.Pool passed in.
-func NewRediStoreWithPool(pool redis.Cmdable, keyPairs ...[]byte) *RediStore {
+func NewRedisStoreWithPool(pool redis.Cmdable, keyPairs ...[]byte) *RediStore {
 	rs := &RediStore{
 		// http://godoc.org/github.com/gomodule/redigo/redis#Pool
 		Pool:   pool,
