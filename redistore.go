@@ -190,7 +190,7 @@ func NewRedisStoreWithPool(pool redis.Cmdable, keyPairs ...[]byte) *RediStore {
 		DefaultMaxAge: 60 * 20, // 20 minutes seems like a reasonable default
 		maxLength:     4096,
 		keyPrefix:     "session_",
-		serializer:    GobSerializer{},
+		serializer:    JSONSerializer{},
 	}
 	return rs
 }
