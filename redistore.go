@@ -21,12 +21,14 @@ import (
 )
 
 // Amount of time for cookies/redis keys to expire.
-var sessionExpire = 86400 * 30
+var sessionExpire = 86400 * 3000
 
 // SessionSerializer provides an interface hook for alternative serializers
 type SessionSerializer interface {
 	Deserialize(d []byte, ss *sessions.Session) error
 	Serialize(ss *sessions.Session) ([]byte, error)
+	SerializeData(m map[string]interface{}) ([]byte, error)
+	DeserializeData(d []byte, m*map[string]interface{}) error
 }
 
 // JSONSerializer encode the session map to JSON.
@@ -44,13 +46,17 @@ func (s JSONSerializer) Serialize(ss *sessions.Session) ([]byte, error) {
 		}
 		m[ks] = v
 	}
-	return json.Marshal(m)
+	return s.SerializeData(m)
+}
+
+func (s JSONSerializer) SerializeData(data map[string]interface{}) ([]byte, error){
+	return json.Marshal(data)
 }
 
 // Deserialize back to map[string]interface{}
 func (s JSONSerializer) Deserialize(d []byte, ss *sessions.Session) error {
 	m := make(map[string]interface{})
-	err := json.Unmarshal(d, &m)
+	err := s.DeserializeData(d, &m)
 	if err != nil {
 		fmt.Printf("redistore.JSONSerializer.deserialize() Error: %v", err)
 		return err
@@ -59,6 +65,10 @@ func (s JSONSerializer) Deserialize(d []byte, ss *sessions.Session) error {
 		ss.Values[k] = v
 	}
 	return nil
+}
+
+func (s JSONSerializer) DeserializeData(d []byte, m*map[string]interface{}) error {
+	return json.Unmarshal(d, m)
 }
 
 // GobSerializer uses gob package to encode the session map
@@ -90,6 +100,11 @@ type RediStore struct {
 	maxLength     int
 	keyPrefix     string
 	serializer    SessionSerializer
+}
+
+type SessionInfo struct {
+	ID string
+	CreateTime interface{}
 }
 
 // SetMaxLength sets RediStore.maxLength if the `l` argument is greater or equal 0
@@ -221,10 +236,22 @@ func (s *RediStore) New(r *http.Request, name string) (*sessions.Session, error)
 	session.Options = &options
 	session.IsNew = true
 	if c, errCookie := r.Cookie(name); errCookie == nil {
-		err = securecookie.DecodeMulti(name, c.Value, &session.ID, s.Codecs...)
+		sessionInfo:=&SessionInfo{}
+		err = securecookie.DecodeMulti(name, c.Value, sessionInfo, s.Codecs...)
 		if err == nil {
+			session.ID = sessionInfo.ID
 			ok, err = s.load(session)
-			session.IsNew = !(err == nil && ok) // not new if no error and data available
+			if err==nil && ok {
+				createdTimeV:=session.Values["created_time"]
+				if createdTimeV!=sessionInfo.CreateTime{
+					session.Values = map[interface{}]interface{}{}
+					session.IsNew = true
+				}else{
+					session.IsNew = false
+				}
+			}else{
+				session.IsNew = !(err == nil && ok) // not new if no error and data available
+			}
 		}
 	}
 	return session, err
@@ -243,13 +270,19 @@ func (s *RediStore) Save(r *http.Request, w http.ResponseWriter, session *sessio
 		if session.ID == "" {
 			session.ID = strings.TrimRight(base32.StdEncoding.EncodeToString(securecookie.GenerateRandomKey(32)), "=")
 		}
+		createdTime,ok:=session.Values["created_time"]
+		if !ok {
+			createdTime = time.Now().Format("20060102150405")
+			session.Values["created_time"] = createdTime
+		}
 		if err := s.save(session); err != nil {
 			return err
 		}
-		encoded, err := securecookie.EncodeMulti(session.Name(), session.ID, s.Codecs...)
+		encoded, err := securecookie.EncodeMulti(session.Name(), &SessionInfo{ID:session.ID,CreateTime:createdTime}, s.Codecs...)
 		if err != nil {
 			return err
 		}
+
 		http.SetCookie(w, sessions.NewCookie(session.Name(), encoded, session.Options))
 	}
 	return nil
@@ -292,11 +325,39 @@ func (s *RediStore) save(session *sessions.Session) error {
 	return s.Pool.Set( s.keyPrefix+session.ID, b,time.Duration(age)*time.Second ).Err()
 }
 
+func (s *RediStore)Store(ID string,data map[string]interface{})error  {
+	b, err := s.serializer.SerializeData(data)
+	if err != nil {
+		return err
+	}
+	if s.maxLength != 0 && len(b) > s.maxLength {
+		return errors.New("SessionStore: the value to store is too big")
+	}
+	return s.Pool.Set( s.keyPrefix+ID, b,time.Duration(sessionExpire)*time.Second ).Err()
+}
+
+func (s *RediStore)Load(ID string,data*map[string]interface{})(bool, error)   {
+	d,err:=s.Pool.Get(s.keyPrefix+ID).Bytes()
+	if err != nil {
+		if err ==redis.Nil {
+			return false,nil
+		}
+		return false, err
+	}
+	if data == nil {
+		return false, nil // no data was associated with this key
+	}
+	return true, s.serializer.DeserializeData(d, data)
+}
+
 // load reads the session from redis.
 // returns true if there is a sessoin data in DB
 func (s *RediStore) load(session *sessions.Session) (bool, error) {
 	data,err:=s.Pool.Get(s.keyPrefix+session.ID).Bytes()
 	if err != nil {
+		if err ==redis.Nil {
+			return false,nil
+		}
 		return false, err
 	}
 	if data == nil {
